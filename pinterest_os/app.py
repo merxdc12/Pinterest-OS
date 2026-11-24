@@ -4,6 +4,7 @@ from __future__ import annotations
 import sys
 import time
 import webbrowser
+from urllib.parse import quote
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, QStandardPaths, QTimer, QSettings
@@ -24,8 +25,11 @@ from .help_page import HelpPage
 from .publishing import PublishingPage
 from .editor import RecordEditor
 from .designer import PinDesigner
+from .content_factory_page import ContentFactoryPage
 from .carousel import CarouselPage
 from .csv_io import import_pins, export_pins
+from . import sheets_api, sheets_exchange
+from .google_sheets_link import parse_sheet_url
 from .storage import Storage
 from .workspace import backup_database, verify_database
 from .product_io import import_products, export_products
@@ -34,11 +38,12 @@ from .project_files import (DB_NAME, MANIFEST, create_project, save_project,
                             verify_project, backup_project, restore_project)
 from .theme import ThemeManager
 
-MENU = ("FILE", "PIN", "BOARD", "CALENDAR", "PUBLISHING",
+MENU = ("FILE", "PIN", "CONTENT FACTORY", "BOARD", "CALENDAR", "PUBLISHING",
         "ANALYTICS", "REPORTS", "TIME", "SETTINGS", "HELP")
 TITLES = {
     "FILE": ("Workspace", "Products and content destinations"),
     "PIN": ("Pin library", "Create, edit and organize organic pin drafts"),
+    "CONTENT FACTORY": ("Content Factory", "Plan, design and review a monthly batch"),
     "BOARD": ("Boards", "Manage board names, links and descriptions"),
     "CALENDAR": ("Publishing calendar", "Plan organic pin publishing dates and times"),
     "PUBLISHING": ("Publishing", "Manual browser-based workflow"),
@@ -89,6 +94,8 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("ITHutir Pinterest OS — Organic Studio")
         self.resize(1360, 820)
         self.setMinimumSize(850, 580)
+        QTimer.singleShot(0, self.apply_ui_language)
+        QTimer.singleShot(100, self.resume_editor_tab)
 
         root = QWidget()
         self.setCentralWidget(root)
@@ -159,12 +166,67 @@ class MainWindow(QMainWindow):
                 table = {"FILE": "products", "PIN": "pins", "BOARD": "boards"}[name]
                 if name == "PIN":
                     tabs = QTabWidget()
+                    self.pin_tabs = tabs
                     catalog = QWidget()
                     catalog_layout = QVBoxLayout(catalog)
                     self.build_catalog(catalog_layout, table)
                     tabs.addTab(catalog, "Pin Library / CSV")
+                    self.build_pin_google_tab(tabs)
                     self.pin_designer = PinDesigner(self.storage)
+                    self.pin_designer.pin_saved.connect(self.pin_google_local_preview)
+                    self.pin_designer.pin_deleted.connect(self.pin_google_local_preview)
+                    self.pin_designer.pin_deleted.connect(lambda _id: self.refresh("pins"))
+                    self.pin_designer.pin_deleted.connect(lambda _id: self.calendar_page.refresh())
                     tabs.addTab(self.pin_designer, "Pin Designer")
+                    free_page = QWidget()
+                    free_layout = QVBoxLayout(free_page)
+                    free_row = QHBoxLayout()
+                    self.free_image_provider = QComboBox()
+                    self.free_image_provider.addItems(["Unsplash", "Pexels", "Pixabay"])
+                    self.free_image_query = QLineEdit()
+                    self.free_image_query.setPlaceholderText("electronics workbench")
+                    self.free_image_query.returnPressed.connect(self.search_free_images)
+                    search_images = QPushButton("Search free images")
+                    search_images.clicked.connect(self.search_free_images)
+                    import_images = QPushButton("IMPORT Image → Pin Designer")
+                    import_images.clicked.connect(self.import_free_image)
+                    free_row.addWidget(self.free_image_provider)
+                    free_row.addWidget(self.free_image_query, 1)
+                    free_row.addWidget(search_images)
+                    free_row.addWidget(import_images)
+                    free_layout.addLayout(free_row)
+                    notice = QLabel("Images open on the provider website in your browser. Download an image, then import it. Verify commercial-use license terms for each image.")
+                    notice.setWordWrap(True)
+                    free_layout.addWidget(notice)
+                    free_layout.addStretch(1)
+                    tabs.addTab(free_page, "Free Image Library")
+                    canva_page = QWidget()
+                    canva_layout = QVBoxLayout(canva_page)
+                    canva_row = QHBoxLayout()
+                    open_canva = QPushButton("Open Canva Templates")
+                    open_canva.clicked.connect(self.pin_designer.open_canva_templates)
+                    import_canva = QPushButton("IMPORT OF CANVA")
+                    import_canva.clicked.connect(self.import_canva_from_tab)
+                    export_canva = QPushButton("EXPOT_in_CANVAS")
+                    export_canva.clicked.connect(self.pin_designer.export_canva_svg)
+                    canva_row.addWidget(open_canva)
+                    canva_row.addWidget(import_canva)
+                    canva_row.addWidget(export_canva)
+                    canva_layout.addLayout(canva_row)
+                    canva_id_row = QHBoxLayout()
+                    canva_id_row.addWidget(QLabel("Canva design ID"))
+                    canva_id_row.addWidget(self.pin_designer.canva_id, 1)
+                    link_canva = QPushButton("Link Canva design to pin")
+                    link_canva.clicked.connect(self.pin_designer.link_canva)
+                    canva_id_row.addWidget(link_canva)
+                    canva_layout.addLayout(canva_id_row)
+                    canva_help = QLabel(
+                        "Uses your existing browser session. IMPORT opens Canva and selects a downloaded image; "
+                        "EXPOT saves an SVG and opens Canva. Files are not transferred automatically.")
+                    canva_help.setWordWrap(True)
+                    canva_layout.addWidget(canva_help)
+                    canva_layout.addStretch(1)
+                    tabs.addTab(canva_page, "CANVA")
                     self.carousel_page = CarouselPage(self.storage)
                     tabs.addTab(self.carousel_page, "Carousel Builder")
                     content.addWidget(tabs, 1)
@@ -172,11 +234,16 @@ class MainWindow(QMainWindow):
                     self.build_catalog(content, table)
                     if name == "FILE":
                         self.build_file_tools(content)
+            elif name == "CONTENT FACTORY":
+                self.content_factory_page = ContentFactoryPage(
+                    self.storage, open_designer=self.open_factory_designer, open_page=self.open_page)
+                content.addWidget(self.content_factory_page, 1)
             elif name == "CALENDAR":
                 self.calendar_page = CalendarPage(self.storage)
                 content.addWidget(self.calendar_page, 1)
             elif name == "SETTINGS":
                 self.settings_page = SettingsPage(self.storage, self.theme)
+                self.settings_page.language_selector.currentIndexChanged.connect(lambda _i: self.apply_ui_language())
                 content.addWidget(self.settings_page, 1)
             elif name == "TIME":
                 self.time_page = TimePage(self.storage, on_change=self.record_elapsed)
@@ -448,6 +515,7 @@ class MainWindow(QMainWindow):
         self.time_page.set_current(0)
         self.time_page.reset_attribution()
         self.settings_page.set_storage(target)
+        self.content_factory_page.set_storage(target)
         for table in self.tables:
             self.refresh(table)
         self.project_label.setText("Active: " + str(folder))
@@ -547,6 +615,256 @@ class MainWindow(QMainWindow):
         ok, reason = verify_database(self.storage.path)
         title = "Database integrity OK" if ok else "Database integrity failed"
         (QMessageBox.information if ok else QMessageBox.warning)(self, title, reason)
+
+    def import_canva_from_tab(self) -> None:
+        self.pin_tabs.setCurrentWidget(self.pin_designer)
+        self.pin_designer.import_canva()
+
+    def search_free_images(self) -> None:
+        query = self.free_image_query.text().strip()
+        if not query:
+            QMessageBox.warning(self, "Free Image Library", "Enter a search phrase.")
+            return
+        base = {
+            "Unsplash": "https://unsplash.com/s/photos/",
+            "Pexels": "https://www.pexels.com/search/",
+            "Pixabay": "https://pixabay.com/images/search/",
+        }.get(self.free_image_provider.currentText())
+        if base:
+            webbrowser.open(base + quote(query, safe="") + "/")
+
+    def import_free_image(self) -> None:
+        self.pin_tabs.setCurrentWidget(self.pin_designer)
+        self.pin_designer.add_image()
+
+    def build_pin_google_tab(self, tabs: QTabWidget) -> None:
+        """Google Sheets workspace belongs to PIN, not connection settings."""
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.addWidget(label("Google Sheets — PIN worksheet", "SectionHeading"))
+        layout.addWidget(label(
+            "Configure OAuth and spreadsheet URL in SETTINGS. "
+            "Select a worksheet here to preview, import or append pins."))
+        controls = QHBoxLayout()
+        self.pin_google_sheet = QComboBox()
+        controls.addWidget(self.pin_google_sheet, 1)
+        refresh = QPushButton("Load worksheets")
+        refresh.clicked.connect(self.pin_google_load)
+        controls.addWidget(refresh)
+        layout.addLayout(controls)
+        actions = QHBoxLayout()
+        for caption, handler in (
+            ("Preview Google rows", self.pin_google_preview),
+            ("IMPOT", self.pin_google_import),
+            ("EXPORT", self.pin_google_export),
+            ("СИНХРОНІЗУВАТИ", self.pin_google_sync)):
+            button = QPushButton(caption)
+            button.clicked.connect(handler)
+            actions.addWidget(button)
+        open_sheet = QPushButton("ВІДКРИТИ ТАБЛИЦЮ")
+        open_sheet.clicked.connect(self.pin_google_open_sheet)
+        actions.addWidget(open_sheet)
+        layout.addLayout(actions)
+        self.pin_google_status = label("No worksheet loaded.")
+        layout.addWidget(self.pin_google_status)
+        self.pin_google_table = QTableWidget()
+        self.pin_google_table.setColumnCount(8)
+        self.pin_google_table.setHorizontalHeaderLabels(
+            [*sheets_exchange.PIN_FIELDS, "tags", "pin_id"])
+        self.pin_google_table.setEditTriggers(
+            QTableWidget.EditTrigger.NoEditTriggers)
+        # Distribute all eight columns across the full available table width.
+        # Recalculate automatically when the window is resized/maximized.
+        self.pin_google_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.Stretch)
+        self.pin_google_table.horizontalHeader().setMinimumSectionSize(65)
+        self.pin_google_table.setAlternatingRowColors(True)
+        self.pin_google_table.setWordWrap(False)
+        layout.addWidget(self.pin_google_table, 1)
+        tabs.addTab(page, "Google Sheets")
+        # Staging is a read-only view of SQLite, not a second unsaved table.
+        # Rebuild it on every visit, including after remote previews.
+        tabs.currentChanged.connect(
+            lambda index: self.pin_google_local_preview()
+            if index == tabs.indexOf(page) else None)
+        self.pin_google_local_preview()
+
+    def pin_google_id(self):
+        url = self.recent_settings.value("sheets/url", "", str)
+        if not url:
+            raise ValueError("Set spreadsheet URL in SETTINGS first")
+        return parse_sheet_url(url)[0]
+
+    def pin_google_open_sheet(self):
+        """Open configured spreadsheet in the user's default browser."""
+        try:
+            spreadsheet_id = self.pin_google_id()
+            url = f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit"
+            if self.pin_google_sheet.currentIndex() >= 0:
+                gid = self.pin_google_sheet.currentData()
+                if gid is not None:
+                    url += f"#gid={int(gid)}"
+            if not webbrowser.open(url):
+                raise RuntimeError("Browser did not confirm opening the link")
+            self.pin_google_status.setText("Opening Google Sheets in browser.")
+        except Exception as exc:
+            self.pin_google_status.setText(f"Open sheet failed: {exc}")
+
+    def pin_google_load(self):
+        try:
+            tabs = sheets_api.worksheets(self.pin_google_id())
+            self.pin_google_sheet.clear()
+            for gid, title in tabs:
+                self.pin_google_sheet.addItem(title, gid)
+            index = self.pin_google_sheet.findText("PIN")
+            if index >= 0:
+                self.pin_google_sheet.setCurrentIndex(index)
+            self.pin_google_status.setText(f"Loaded {len(tabs)} worksheets")
+        except Exception as exc:
+            self.pin_google_status.setText(f"Google error: {exc}")
+
+    def pin_google_title(self):
+        if self.pin_google_sheet.currentIndex() < 0:
+            raise ValueError("Load worksheets first")
+        return self.pin_google_sheet.currentText()
+
+    def pin_google_local_preview(self, saved_pin_id=None):
+        """Refresh the Google Sheets staging grid from locally saved pins.
+
+        This never accesses Google or changes the remote spreadsheet.
+        """
+        headers = [*sheets_exchange.PIN_FIELDS, "tags", "pin_id"]
+        rows = sheets_exchange.export_pin_rows_with_ids(self.storage)
+        grid = self.pin_google_table
+        grid.setColumnCount(len(headers))
+        grid.setHorizontalHeaderLabels(headers)
+        grid.setRowCount(len(rows))
+        for i, record in enumerate(rows):
+            for j, key in enumerate(headers):
+                grid.setItem(i, j, QTableWidgetItem(str(record.get(key, ""))))
+        self.pin_google_status.setText(
+            f"Локально підготовлено {len(rows)} пінів. "
+            "Google Sheets не змінено — для експорту натисніть СИНХРОНІЗУВАТИ.")
+
+    def pin_google_preview(self):
+        try:
+            rows = sheets_api.read_rows(
+                self.pin_google_id(), self.pin_google_title(), limit=101)
+            grid = self.pin_google_table
+            headers = rows[0] if rows else [*sheets_exchange.PIN_FIELDS, "tags", "pin_id"]
+            grid.setColumnCount(max(8, len(headers)))
+            grid.setHorizontalHeaderLabels(
+                list(headers) + [""] * (grid.columnCount()-len(headers)))
+            data = rows[1:] if rows else []
+            grid.setRowCount(len(data))
+            for i, row in enumerate(data):
+                for j, cell in enumerate(row):
+                    grid.setItem(i, j, QTableWidgetItem(str(cell)))
+            self.pin_google_status.setText(f"Preview: {len(data)} rows (max 100)")
+        except Exception as exc:
+            self.pin_google_status.setText(f"Preview error: {exc}")
+
+    def pin_google_sync(self):
+        """Preview ID-based outbound sync; explicit approval before append."""
+        try:
+            title = self.pin_google_title()
+            headers = [*sheets_exchange.PIN_FIELDS, "tags", "pin_id"]
+            local = sheets_exchange.export_pin_rows_with_ids(self.storage)
+            remote = sheets_api.read_rows(
+                self.pin_google_id(), title, limit=100001)
+            if remote and list(remote[0]) != headers:
+                raise ValueError(
+                    "Google worksheet columns differ. Sync cancelled; no changes.")
+            if remote and any(row and (len(row) < 8 or not str(row[7]).strip())
+                              for row in remote[1:]):
+                raise ValueError(
+                    "Existing rows without pin_id. Sync cancelled to prevent duplicates.")
+            ids = [str(row[7]).strip() for row in remote[1:]]
+            if len(ids) != len(set(ids)):
+                raise ValueError("Duplicate pin_id in Google Sheets; sync cancelled.")
+            existing = set(ids)
+            new = sum(str(record["pin_id"]) not in existing for record in local)
+            skipped = len(local) - new
+            answer = QMessageBox.question(
+                self, "Confirm PIN synchronization",
+                f"Worksheet: {title}\n"
+                f"New pins to append: {new}\n"
+                f"Already synchronized: {skipped}\n"
+                "Direction: Pinterest OS → Google Sheets only.\n"
+                "Existing rows will not be updated or deleted. Continue?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if answer != QMessageBox.StandardButton.Yes:
+                self.pin_google_status.setText("Synchronization cancelled; no Google changes.")
+                return
+            added, skipped = sheets_api.append_unique_pins(
+                self.pin_google_id(), title, headers, local)
+            self.pin_google_preview()
+            self.pin_google_status.setText(
+                f"Sync complete: {added} new rows, {skipped} skipped. "
+                "Existing rows unchanged.")
+        except Exception as exc:
+            self.pin_google_status.setText(f"Sync failed (no confirmed completion): {exc}")
+
+    def pin_google_import(self):
+        try:
+            self.settings_page.sheet_tab.clear()
+            self.settings_page.sheet_tab.addItem(self.pin_google_title())
+            self.settings_page.import_google_pins()
+            self.pin_google_local_preview()
+            self.pin_google_status.setText(self.settings_page.sheet_status.text())
+        except Exception as exc:
+            self.pin_google_status.setText(f"Import error: {exc}")
+
+    def pin_google_export(self):
+        """Export the saved SQLite pins to the selected remote worksheet.
+
+        Only append missing pin IDs. An empty worksheet gets eight headers.
+        Never overwrite incompatible or existing user rows.
+        """
+        try:
+            title = self.pin_google_title()
+            spreadsheet_id = self.pin_google_id()
+            headers = [*sheets_exchange.PIN_FIELDS, "tags", "pin_id"]
+            records = sheets_exchange.export_pin_rows_with_ids(self.storage)
+            if not records:
+                self.pin_google_status.setText(
+                    "Немає збережених локальних пінів для експорту.")
+                return
+            # Read-only preflight: surface incompatible headers before approval.
+            remote = sheets_api.read_rows(spreadsheet_id, title, limit=100001)
+            if remote and list(remote[0]) != headers:
+                raise ValueError(
+                    "У Google аркуші інші заголовки. Експорт зупинено "
+                    "без зміни наявних даних.")
+            existing = {str(row[7]).strip() for row in remote[1:]
+                        if len(row) > 7 and str(row[7]).strip()}
+            new_count = sum(str(r["pin_id"]) not in existing for r in records)
+            answer = QMessageBox.question(
+                self, "Підтвердити експорт пінів",
+                f"Аркуш: {title}\n"
+                f"Локальних пінів: {len(records)}\n"
+                f"Нових для додавання: {new_count}\n"
+                "Порожній аркуш отримає 8 заголовків (A:H).\n"
+                "Існуючі рядки не перезаписуються. Продовжити?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if answer != QMessageBox.StandardButton.Yes:
+                self.pin_google_status.setText(
+                    "Експорт скасовано; Google Sheets не змінено.")
+                return
+            added, skipped = sheets_api.append_unique_pins(
+                spreadsheet_id, title, headers, records)
+            self.pin_google_status.setText(
+                f"Експорт завершено: додано {added}; пропущено {skipped}.")
+            # Keep the local staging grid visible and refresh it from SQLite.
+            self.pin_google_local_preview()
+            self.pin_google_status.setText(
+                f"Експорт завершено: додано {added}; пропущено {skipped}. "
+                "Перевірте результат кнопкою Preview Google rows.")
+        except Exception as exc:
+            self.pin_google_status.setText(
+                f"Помилка експорту ({type(exc).__name__}): {exc}")
 
     def build_catalog(self, content: QVBoxLayout, table: str) -> None:
         panel, body = card()
@@ -896,7 +1214,42 @@ class MainWindow(QMainWindow):
         if record:
             self.edit_record(table, record)
 
+    def open_factory_designer(self, pin_id: int) -> None:
+        if not self.pin_designer.confirm_discard():
+            return
+        self.pin_designer.dirty = False
+        self.pin_designer._saved_snapshot = self.pin_designer.snapshot()
+        self.pin_designer.pin.blockSignals(True)
+        self.pin_designer.reload_pins()
+        self.pin_designer.pin.setCurrentIndex(self.pin_designer.pin.findData(pin_id))
+        self.pin_designer.pin.blockSignals(False)
+        if self.storage.get_pin_design(pin_id):
+            self.pin_designer.load_pin()
+        else:
+            self.pin_designer.apply_template()
+        self.pin_tabs.setCurrentIndex(1)
+        self.open_page('PIN')
+
+    def resume_editor_tab(self):
+        if getattr(self.pin_designer, "_canvas_pin_id", None) is None:
+            return
+        self.open_page("PIN")
+        self.pin_tabs.setCurrentWidget(self.pin_designer)
+
+    def apply_ui_language(self):
+        from .i18n_uk import apply_language, UK
+        language = self.recent_settings.value("appearance/language", "en", str)
+        apply_language(self, language)
+        for key, button in self.nav_buttons.items():
+            button.setText(UK.get(key, key) if language == "uk" else key)
+
     def open_page(self, name: str) -> None:
+        if name == 'PIN':
+            self.refresh('pins')
+        elif name == 'CONTENT FACTORY':
+            self.content_factory_page.reload()
+        elif name in ('CALENDAR', 'PUBLISHING', 'ANALYTICS'):
+            getattr(self, name.lower() + '_page').refresh()
         self.pages.setCurrentIndex(MENU.index(name))
         for key, button in self.nav_buttons.items():
             button.setChecked(key == name)
@@ -947,6 +1300,11 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Session stopped. Data saved.")
 
     def closeEvent(self, event) -> None:
+        worker = self.content_factory_page.worker
+        if worker and worker.isRunning():
+            self.statusBar().showMessage('RSS refresh is finishing. Please close again once it completes.')
+            event.ignore()
+            return
         if not self.pin_designer.confirm_discard():
             event.ignore()
             return

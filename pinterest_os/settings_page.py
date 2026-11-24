@@ -55,6 +55,16 @@ class SettingsPage(QWidget):
         self.theme_selector.currentIndexChanged.connect(self.change_theme)
         layout.addWidget(self.theme_selector)
         self.preferences = QSettings("ITHutir", "PinterestOS")
+        from .i18n_uk import apply_language
+        language_label = QLabel("Language / Мова")
+        layout.addWidget(language_label)
+        self.language_selector = QComboBox()
+        self.language_selector.addItem("English", "en")
+        self.language_selector.addItem("Українська", "uk")
+        selected_language = self.preferences.value("appearance/language", "en", str)
+        self.language_selector.setCurrentIndex(max(0, self.language_selector.findData(selected_language)))
+        self.language_selector.currentIndexChanged.connect(self.change_language)
+        layout.addWidget(self.language_selector)
         accounts = QGroupBox("Accounts — browser sign-in (no stored passwords)")
         form = QFormLayout(accounts)
         form.setVerticalSpacing(12)
@@ -139,14 +149,10 @@ class SettingsPage(QWidget):
         export_reports = QPushButton("Export USD report to NEW worksheet")
         export_reports.clicked.connect(lambda: self.export_google("reports"))
         sheet_form.addRow(export_reports)
-        import_pins = QPushButton("Import selected worksheet as NEW pins")
-        import_pins.clicked.connect(self.import_google_pins)
-        sheet_form.addRow(import_pins)
         import_metrics = QPushButton("Import NEW Pinterest metrics from selected worksheet")
         import_metrics.clicked.connect(self.import_google_metrics)
         sheet_form.addRow(import_metrics)
         for kind, caption in (
-            ("pins", "Export pins to NEW worksheet"),
             ("time", "Export TIME entries to NEW worksheet"),
             ("analytics", "Export imported Pinterest metrics to NEW worksheet"),
         ):
@@ -178,6 +184,13 @@ class SettingsPage(QWidget):
             button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.sheet_preview.setMinimumHeight(220)
         self.refresh()
+
+    def change_language(self, _index):
+        from .i18n_uk import apply_language
+        language = self.language_selector.currentData()
+        self.preferences.setValue("appearance/language", language)
+        window = self.window()
+        apply_language(window, language)
 
     def change_theme(self, index):
         preference = self.theme_selector.itemData(index)
@@ -366,8 +379,8 @@ class SettingsPage(QWidget):
                 headers = REPORT_FIELDS
                 records = report_rows(self.storage, "USD")
             elif kind == "pins":
-                headers = sheets_exchange.PIN_FIELDS
-                records = sheets_exchange.export_pin_rows(self.storage)
+                headers = (*sheets_exchange.PIN_FIELDS, "tags", "pin_id")
+                records = sheets_exchange.export_pin_rows_with_ids(self.storage)
             elif kind == "time":
                 headers = sheets_exchange.TIME_FIELDS
                 records = sheets_exchange.export_time_rows(self.storage)
@@ -376,6 +389,22 @@ class SettingsPage(QWidget):
                 records = sheets_exchange.export_metric_rows(self.storage)
             else:
                 raise ValueError("Unknown export type")
+            if kind == "pins":
+                title = self._selected_title()
+                answer = QMessageBox.question(
+                    self, "Confirm append to Google Sheets",
+                    f"Export missing pins to EXISTING worksheet '{title}'? "
+                    "If empty, create and freeze column headers automatically. "
+                    "Existing pin rows are never overwritten.",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No)
+                if answer != QMessageBox.StandardButton.Yes:
+                    return
+                added, skipped = sheets_api.append_unique_pins(
+                    spreadsheet_id, title, headers, records)
+                self.sheet_status.setText(
+                    f"PIN export: appended {added} rows; skipped {skipped} duplicates.")
+                return
             stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
             title = f"ITHutir_{kind}_{stamp}"
         except Exception as exc:
@@ -397,24 +426,79 @@ class SettingsPage(QWidget):
             self._google_error(exc)
 
     def import_google_pins(self):
+        """Import only genuinely new remote PIN IDs; never duplicate local pins."""
+        headers = [*sheets_exchange.PIN_FIELDS, "tags", "pin_id"]
         try:
-            rows = sheets_api.read_rows(self._google_id(), self._selected_title(), limit=10001)
-            records = sheets_exchange.parse_pin_rows(rows, self.storage)
+            rows = sheets_api.read_rows(self._google_id(), self._selected_title(),
+                                        limit=10001)
+            if not rows or list(rows[0]) != headers:
+                raise ValueError("Expected 8 PIN columns: " + ", ".join(headers))
+            if len(rows) > 10001:
+                raise ValueError("Too many rows")
+            local_rows = sheets_exchange.export_pin_rows_with_ids(self.storage)
+            known_ids = {str(r["pin_id"]) for r in local_rows}
+            known_titles = {str(r["title"]).strip().casefold() for r in local_rows}
+            unseen = []
+            incoming_ids = set()
+            for index, raw in enumerate(rows[1:], 2):
+                values = list(raw) + [""] * max(0, 8-len(raw))
+                if len(values) > 8:
+                    raise ValueError(f"Row {index}: too many columns")
+                remote_id = str(values[7]).strip()
+                if not remote_id:
+                    raise ValueError(f"Row {index}: missing pin_id")
+                if remote_id in incoming_ids:
+                    raise ValueError(f"Row {index}: duplicate pin_id")
+                incoming_ids.add(remote_id)
+                if remote_id in known_ids:
+                    continue
+                if str(values[0]).strip().casefold() in known_titles:
+                    raise ValueError(f"Row {index}: title already exists locally under another ID")
+                unseen.append(values)
+            if not unseen:
+                self.sheet_status.setText("Import: 0 new pins; all remote IDs already exist locally.")
+                return
+            # Validate all rows before modifying SQLite; preserve imported tags.
+            # Remote publication claims are never accepted as verified.
+            for values in unseen:
+                if values[3] == "PUBLISHED":
+                    raise ValueError("Remote PUBLISHED status is unverified; change to DRAFT first")
+            records = sheets_exchange.parse_pin_rows(
+                [list(sheets_exchange.PIN_FIELDS)] + [r[:6] for r in unseen],
+                self.storage)
             sheets_exchange.ensure_new_pins(self.storage, records)
         except Exception as exc:
             self._google_error(exc)
             return
         answer = QMessageBox.question(
             self, "Confirm Google Sheets pin import",
-            f"Create {len(records)} NEW local pins? Existing pins are not changed. "
-            "Remote PUBLISHED statuses are unverified; no Pinterest publication occurs.",
+            f"Import {len(records)} NEW pins into local SQLite? "
+            "Existing pins will not change. Continue?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No)
         if answer != QMessageBox.StandardButton.Yes:
+            self.sheet_status.setText("Import cancelled.")
             return
         try:
-            count = sheets_exchange.import_pin_rows(self.storage, records)
-            self.sheet_status.setText(f"Imported {count} new local pins; no publishing performed.")
+            with self.storage.conn:
+                previous_ids = {row["id"] for row in self.storage.all("pins")}
+                count = sheets_exchange.import_pin_rows(self.storage, records)
+                local_ids = sorted(
+                    row["id"] for row in self.storage.all("pins")
+                    if row["id"] not in previous_ids)
+                if len(local_ids) != count:
+                    raise RuntimeError("Imported pin ID count mismatch")
+                self.storage.conn.execute(
+                    "CREATE TABLE IF NOT EXISTS google_pin_export_ids "
+                    "(pin_id INTEGER PRIMARY KEY, export_id TEXT NOT NULL UNIQUE)")
+                for local_id, values in zip(local_ids, unseen):
+                    self.storage.conn.execute(
+                        "UPDATE pins SET tags=? WHERE id=?",
+                        (values[6], local_id))
+                    self.storage.conn.execute(
+                        "INSERT INTO google_pin_export_ids(pin_id,export_id) VALUES(?,?)",
+                        (local_id, values[7]))
+            self.sheet_status.setText(f"Imported {count} new pins; existing pins unchanged.")
             window = self.window()
             if hasattr(window, "refresh") and hasattr(window, "tables"):
                 window.refresh("pins")

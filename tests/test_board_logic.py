@@ -14,7 +14,8 @@ def test_board_categories_and_assignment(tmp_path: Path):
         pin = storage.create("pins", title="ESP32 setup", board_id=board, status="READY")
         assert storage.board_pin_count(board) == 1
         assert storage.board_pin_counts()[board] == 1
-        assert storage.search_boards("esp32") == []
+        assert [row["id"] for row in storage.search_boards("esp32")] == [board]
+        assert storage.search_boards("nonexistent") == []
         assert len(storage.search_boards("embedded")) == 1
         assert storage.get("boards", board)["category"] == CATEGORIES[1]
         assert board_plan(storage.get("boards", board), storage.all("pins"),

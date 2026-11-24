@@ -2,6 +2,7 @@
 from pinterest_os.storage import Storage
 from pinterest_os.profit_costs import add_cost, set_hourly_rate
 from pinterest_os.product_profitability import product_profitability
+from pinterest_os.financial_integrity import record_review
 
 
 def test_product_contribution_and_roi(tmp_path):
@@ -23,6 +24,12 @@ def test_product_contribution_and_roi(tmp_path):
         assert first["estimated_contribution_cents"] is None
         assert first["roi_percent"] is None
         set_hourly_rate(db, "USD", "10.00")
+        blocked = product_profitability(db, "USD")[0]
+        assert blocked["reconciliation_required"]
+        assert blocked["estimated_contribution_cents"] is None
+        assert blocked["roi_percent"] is None
+        record_review(db, "USD", "2026-11-01", pin, "DISTINCT",
+                      "Fixture: independent reported and design asset costs")
         result = product_profitability(db, "USD")[0]
         assert result["known_cost_cents"] == 3000
         assert result["labor_cents"] == 1000

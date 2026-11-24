@@ -33,7 +33,7 @@ def test_manual_confirmation_requires_complete_pin(tmp_path: Path):
         assert storage.get_schedule(entry)["status"] == "PUBLISHED"
         assert storage.get("pins", pin)["status"] == "PUBLISHED"
         assert pending_queue(storage) == []
-        with pytest.raises(ValueError, match="Already"):
+        with pytest.raises(ValueError, match="already"):
             mark_published(storage, entry)
     finally:
         storage.close()

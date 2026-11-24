@@ -131,3 +131,35 @@ def import_metric_rows(storage, records):
             """INSERT INTO pinterest_metrics(date,pin_id,impressions,outbound_clicks,saves)
                VALUES(?,?,?,?,?)""", records)
     return len(records)
+
+
+def export_pin_rows_with_ids(storage):
+    """Stable short sequential PIN ID with date, shared by PNG and Google Sheets.
+
+    Example: 0007-20261111. The sequence is the permanent local pin number;
+    the date is assigned when the export ID is first generated, not each export.
+    """
+    from datetime import datetime
+    pins = storage.all("pins")
+    with storage.conn:
+        storage.conn.execute(
+            "CREATE TABLE IF NOT EXISTS google_pin_export_ids "
+            "(pin_id INTEGER PRIMARY KEY, export_id TEXT NOT NULL UNIQUE)")
+        for pin in pins:
+            local_id = int(pin["id"])
+            existing = storage.conn.execute(
+                "SELECT export_id FROM google_pin_export_ids WHERE pin_id=?",
+                (local_id,)).fetchone()
+            if existing:
+                # Keep previously issued identifiers: replacing them would
+                # create duplicate records in already synchronized worksheets.
+                continue
+            today = datetime.now().strftime("%Y%m%d")
+            export_id = f"{local_id:04d}-{today}"
+            storage.conn.execute(
+                "INSERT INTO google_pin_export_ids(pin_id,export_id) VALUES(?,?)",
+                (local_id, export_id))
+    ids = dict(storage.conn.execute(
+        "SELECT pin_id,export_id FROM google_pin_export_ids").fetchall())
+    return [{**row, "tags": pin.get("tags") or "", "pin_id": ids[pin["id"]]}
+            for pin, row in zip(pins, export_pin_rows(storage))]

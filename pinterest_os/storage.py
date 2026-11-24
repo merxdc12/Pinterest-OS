@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS boards (
 );
 CREATE TABLE IF NOT EXISTS pins (
  id INTEGER PRIMARY KEY, title TEXT NOT NULL,
- description TEXT NOT NULL DEFAULT '', destination_url TEXT NOT NULL DEFAULT '',
+ description TEXT NOT NULL DEFAULT '', tags TEXT NOT NULL DEFAULT '', destination_url TEXT NOT NULL DEFAULT '',
  product_id INTEGER REFERENCES products(id) ON DELETE SET NULL,
  board_id INTEGER REFERENCES boards(id) ON DELETE SET NULL,
  status TEXT NOT NULL DEFAULT 'DRAFT'
@@ -109,7 +109,7 @@ CREATE TABLE IF NOT EXISTS time_entries (
 FIELDS = {
  "products": ("name", "target_url", "category"),
  "boards": ("name", "url", "description", "category"),
- "pins": ("title", "description", "destination_url", "product_id", "board_id", "status"),
+ "pins": ("title", "description", "tags", "destination_url", "product_id", "board_id", "status"),
 }
 REQUIRED = {"products": "name", "boards": "name", "pins": "title"}
 STATUSES = {"DRAFT", "IN_REVIEW", "READY", "PUBLISHED"}
@@ -125,39 +125,50 @@ class Storage:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(self.path)
         self.conn.execute("PRAGMA foreign_keys=ON")
-        self.conn.executescript(SCHEMA)
-        # Non-destructive upgrades of Phase 1 databases.
-        for table, additions in {
-            "products": {"category": "TEXT NOT NULL DEFAULT 'POD'"},
-            "boards": {"description": "TEXT NOT NULL DEFAULT ''",
-                       "category": "TEXT NOT NULL DEFAULT 'Other'"},
-            "pins": {"destination_url": "TEXT NOT NULL DEFAULT ''"},
-        }.items():
-            present = {row[1] for row in self.conn.execute(f"PRAGMA table_info({table})")}
-            for field, sql_type in additions.items():
-                if field not in present:
-                    self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {field} {sql_type}")
-        present = {row[1] for row in self.conn.execute("PRAGMA table_info(pin_designs)")}
-        if "canva_design_id" not in present:
-            self.conn.execute("ALTER TABLE pin_designs ADD COLUMN canva_design_id TEXT NOT NULL DEFAULT ''")
-        # Additive migration: preserve existing cost entries without inventing provenance.
-        cost_columns = {row[1] for row in self.conn.execute("PRAGMA table_info(cost_entries)")}
-        if "source_ref" not in cost_columns:
-            self.conn.execute("ALTER TABLE cost_entries ADD COLUMN source_ref TEXT")
-        self.conn.execute(
-            """CREATE UNIQUE INDEX IF NOT EXISTS ux_cost_source_ref
-               ON cost_entries(currency,source_ref) WHERE source_ref IS NOT NULL""")
-        # Historical product attribution: never guess a product for legacy entries.
-        time_columns = {row[1] for row in self.conn.execute("PRAGMA table_info(time_entries)")}
-        for column, declaration in {
-            "pin_id": "INTEGER REFERENCES pins(id)",
-            "product_id_snapshot": "INTEGER",
-            "product_name_snapshot": "TEXT",
-            "attribution_known": "INTEGER NOT NULL DEFAULT 0",
-        }.items():
-            if column not in time_columns:
-                self.conn.execute(f"ALTER TABLE time_entries ADD COLUMN {column} {declaration}")
-        self.conn.commit()
+        from .content_migrations import backup_before_migration, migrate
+        try:
+            self.migration_backup = backup_before_migration(self.conn, self.path)
+            self.conn.execute("BEGIN IMMEDIATE")
+            for statement in SCHEMA.split(";"):
+                if statement.strip():
+                    self.conn.execute(statement)
+            # Non-destructive upgrades of Phase 1 databases.
+            for table, additions in {
+                "products": {"category": "TEXT NOT NULL DEFAULT 'POD'"},
+                "boards": {"description": "TEXT NOT NULL DEFAULT ''",
+                           "category": "TEXT NOT NULL DEFAULT 'Other'"},
+                "pins": {"destination_url": "TEXT NOT NULL DEFAULT ''", "tags": "TEXT NOT NULL DEFAULT ''"},
+            }.items():
+                present = {row[1] for row in self.conn.execute(f"PRAGMA table_info({table})")}
+                for field, sql_type in additions.items():
+                    if field not in present:
+                        self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {field} {sql_type}")
+            present = {row[1] for row in self.conn.execute("PRAGMA table_info(pin_designs)")}
+            if "canva_design_id" not in present:
+                self.conn.execute("ALTER TABLE pin_designs ADD COLUMN canva_design_id TEXT NOT NULL DEFAULT ''")
+            # Additive migration: preserve existing cost entries without inventing provenance.
+            cost_columns = {row[1] for row in self.conn.execute("PRAGMA table_info(cost_entries)")}
+            if "source_ref" not in cost_columns:
+                self.conn.execute("ALTER TABLE cost_entries ADD COLUMN source_ref TEXT")
+            self.conn.execute(
+                """CREATE UNIQUE INDEX IF NOT EXISTS ux_cost_source_ref
+                   ON cost_entries(currency,source_ref) WHERE source_ref IS NOT NULL""")
+            # Historical product attribution: never guess a product for legacy entries.
+            time_columns = {row[1] for row in self.conn.execute("PRAGMA table_info(time_entries)")}
+            for column, declaration in {
+                "pin_id": "INTEGER REFERENCES pins(id)",
+                "product_id_snapshot": "INTEGER",
+                "product_name_snapshot": "TEXT",
+                "attribution_known": "INTEGER NOT NULL DEFAULT 0",
+            }.items():
+                if column not in time_columns:
+                    self.conn.execute(f"ALTER TABLE time_entries ADD COLUMN {column} {declaration}")
+            migrate(self.conn)
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            self.conn.close()
+            raise
 
     def set_canva_design_id(self, pin_id: int, design_id: str) -> None:
         from .canva_bridge import validate_canva_design_id
@@ -473,6 +484,10 @@ class Storage:
                 raise ValueError("Schedule already completed or cancelled")
             if pin_status == "PUBLISHED":
                 raise ValueError("Pin already marked as published")
+            from .content_factory import ContentFactory
+            factory_issues = ContentFactory(self).publication_issues(pin_id)
+            if factory_issues:
+                raise ValueError("Incomplete Content Factory review: " + ", ".join(factory_issues))
             result = self.conn.execute(
                 """UPDATE pin_schedule SET status='PUBLISHED'
                    WHERE id=? AND status IN ('PLANNED','READY')""", (entry_id,))

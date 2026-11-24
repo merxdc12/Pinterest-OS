@@ -136,6 +136,15 @@ class PublishingPage(QWidget):
                    + "Description: " + pin["description"] + "\\n"
                    + "Destination: " + pin["destination_url"] + "\\n"
                    + "Board: " + (board["name"] if board else "Unassigned"))
+        from .content_factory import ContentFactory
+        factory = ContentFactory(self.storage)
+        slots = factory.rows('SELECT id FROM campaign_slots WHERE pin_id=?', (pin['id'],))
+        if slots:
+            issues = factory.publication_issues(pin['id'])
+            if issues:
+                QMessageBox.warning(self, 'Content Factory review', '\n'.join(issues))
+                return
+            details += '\nAlt text: ' + factory.copy(slots[0]['id'])['alt_text']
         QApplication.clipboard().setText(details)
         QMessageBox.information(self, "Copied", "Pin details copied for manual pasting.")
 

@@ -42,7 +42,6 @@ class ProjectTests(unittest.TestCase):
         try:
             row = copy.execute("SELECT project_json FROM pin_designs").fetchone()
             path = Path(json.loads(row[0])["layers"][0]["path"])
-            self.assertTrue(path.is_file())
             self.assertFalse(path.is_absolute())
             self.assertTrue((restored / path).is_file())
         finally:
