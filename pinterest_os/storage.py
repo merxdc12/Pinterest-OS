@@ -128,6 +128,8 @@ class Storage:
         from .content_migrations import backup_before_migration, migrate
         try:
             self.migration_backup = backup_before_migration(self.conn, self.path)
+            from .content_plan import backup_before_migration as backup_plan
+            self.content_plan_backup = (self.migration_backup or backup_plan(self.conn,self.path))
             self.conn.execute("BEGIN IMMEDIATE")
             for statement in SCHEMA.split(";"):
                 if statement.strip():
@@ -164,6 +166,12 @@ class Storage:
                 if column not in time_columns:
                     self.conn.execute(f"ALTER TABLE time_entries ADD COLUMN {column} {declaration}")
             migrate(self.conn)
+            from .tracking_registry import SCHEMA as tracking_schema
+            self.conn.execute(tracking_schema)
+            from .content_plan import migrate as migrate_plan
+            migrate_plan(self.conn)
+            from .pinterest_import import migrate as migrate_pinterest_import
+            migrate_pinterest_import(self.conn)
             self.conn.commit()
         except Exception:
             self.conn.rollback()

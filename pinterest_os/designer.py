@@ -80,6 +80,7 @@ class LayerImage(QGraphicsPixmapItem):
 class PinDesigner(QWidget):
     pin_saved = pyqtSignal(int)
     pin_deleted = pyqtSignal(int)
+    plan_requested = pyqtSignal(int)
 
     def __init__(self, storage=None, parent=None):
         super().__init__(parent)
@@ -89,6 +90,7 @@ class PinDesigner(QWidget):
         self._loading = False
         self._saved_snapshot = None
         self._canvas_pin_id = None
+        self._blank_draft = False
         self._resume_settings = QSettings("ITHutir", "PinterestOS")
         self._resume_key = ("editor/last_pin/" + str(storage.path.resolve())
                             if storage else None)
@@ -115,13 +117,21 @@ class PinDesigner(QWidget):
         form.setSpacing(9)
         form.setContentsMargins(10, 10, 10, 10)
         self.pin = QComboBox()
+        self.new_pin_button = QPushButton("Create new pin")
+        self.new_pin_button.setObjectName("Primary")
+        self.new_pin_button.clicked.connect(self.start_new_pin)
         self.save_button = QPushButton("ЗБЕРЕГТИ ПІН (Ctrl+S)")
         self.save_button.setObjectName("Primary")
         self.save_button.clicked.connect(self.save_pin_simple)
         pin_save_row = QHBoxLayout()
-        pin_save_row.addWidget(self.pin, 2)
+        pin_save_row.addWidget(self.new_pin_button, 1)
         pin_save_row.addWidget(self.save_button, 1)
-        form.addRow("Пов'язаний пін", pin_save_row)
+        form.addRow("Пов'язаний пін", self.pin)
+        form.addRow(pin_save_row)
+        self.plan_button=QPushButton("ДОДАТИ В КОНТЕНТ-ПЛАН")
+        self.plan_button.setToolTip("Планує збережений пін на конкретну дошку, дату та час.")
+        self.plan_button.clicked.connect(self.request_plan)
+        form.addRow(self.plan_button)
         self.export_pin_id = QLineEdit()
         self.export_pin_id.setReadOnly(True)
         form.addRow("PIN ID (image + Sheets)", self.export_pin_id)
@@ -137,6 +147,15 @@ class PinDesigner(QWidget):
         self.destination_url = QLineEdit()
         self.destination_url.setPlaceholderText("https://ithutir.com/relevant-page")
         form.addRow("Destination URL", self.destination_url)
+        url_help = (
+            "Вставте повну URL-адресу (https:// або http://) сторінки товару, "
+            "статті, калькулятора чи іншої цільової сторінки. "
+            "Саме на цю сторінку має переходити користувач із Pinterest. "
+            "Посилання може містити UTM-мітки. "
+            "Щоб зберегти адресу, натисніть «ЗБЕРЕГТИ ПІН» (Ctrl+S)."
+        )
+        self.destination_url.setToolTip(url_help)
+        form.labelForField(self.destination_url).setToolTip(url_help)
         self.pin_board = QComboBox()
         form.addRow("Дошка / Board", self.pin_board)
         new_board = QPushButton("+ Створити дошку в каталозі")
@@ -153,7 +172,7 @@ class PinDesigner(QWidget):
         self.reload_metadata_choices()
         # Metadata is committed with the design via Save pin / Ctrl+S.
         create_pin = QPushButton("Create new pin for this design")
-        create_pin.clicked.connect(self.create_pin_for_design)
+        create_pin.clicked.connect(lambda: self.create_pin_for_design(prompt_title=True))
         form.addRow(create_pin)
         self.reload_pins()
         self.pin.currentIndexChanged.connect(self.on_pin_changed)
@@ -273,6 +292,70 @@ class PinDesigner(QWidget):
         self._dirty_timer.setSingleShot(True)
         self._dirty_timer.timeout.connect(self.check_dirty)
 
+    def request_plan(self):
+        pid=self.pin.currentData()
+        if pid is None or self._canvas_pin_id!=pid:
+            QMessageBox.warning(self,"Контент-план","Спочатку створіть, збережіть або завантажте пін.")
+            return
+        self.check_dirty()
+        if self.dirty or self.metadata_snapshot()!=self._metadata_snapshot:
+            QMessageBox.warning(self,"Контент-план","Спочатку збережіть зміни піна.")
+            return
+        self.plan_requested.emit(int(pid))
+
+    def metadata_snapshot(self):
+        return (self.pin_title.text(), self.pin_description.text(),
+                self.pin_tags.text(), self.destination_url.text(),
+                self.pin_board.currentData(), self.pin_product.currentData(),
+                self.pin_status.currentText())
+
+    def start_new_pin(self):
+        """Start an empty, unlinked draft without changing saved pins or files."""
+        if self.storage is None:
+            QMessageBox.warning(self, "No project", "Open a Pinterest OS project first.")
+            return
+        self._dirty_timer.stop()
+        self.check_dirty()
+        if self.dirty or self.metadata_snapshot() != self._metadata_snapshot:
+            answer = QMessageBox.question(
+                self, "Незбережені зміни",
+                "Почати новий пін і відкинути незбережені зміни поточного? "
+                "Збережений пін залишиться в бібліотеці.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        self._loading = True
+        try:
+            self._blank_draft = True
+            self._canvas_pin_id = None
+            self.pin.setCurrentIndex(-1)
+            self.on_pin_changed(-1)
+            self.canva_id.clear()
+            self.template.setCurrentIndex(0)
+            self.background = TEMPLATES["ITHutir Dark"]["background"]
+            self.reset_scene()
+            self.refresh_layers()
+            self.text.clear()
+            self.font.setCurrentFont(QFont("DejaVu Sans"))
+            self.bold_font.setChecked(True)
+            self.size.setValue(48)
+            self.alignment.setCurrentText("center")
+            self.x_position.setValue(0)
+            self.y_position.setValue(0)
+            self.zoom.setValue(100)
+            self.fit()
+            if self._resume_key:
+                self._resume_settings.remove(self._resume_key)
+                self._resume_settings.sync()
+            self._saved_snapshot = self.snapshot()
+            self._metadata_snapshot = self.metadata_snapshot()
+            self.dirty = False
+            self.dirty_label.setText("New pin — not saved")
+            self.pin_title.setFocus()
+        finally:
+            self._loading = False
+
     def snapshot(self):
         return json.dumps(self.project(), ensure_ascii=False, sort_keys=True)
 
@@ -283,21 +366,25 @@ class PinDesigner(QWidget):
     def check_dirty(self):
         if not self._loading and self._saved_snapshot is not None:
             self.dirty = self.snapshot() != self._saved_snapshot
-            self.dirty_label.setText("Unsaved changes" if self.dirty else "Saved / no pending changes")
+            self.dirty_label.setText("Unsaved changes" if self.dirty else
+                                     "New pin — not saved" if self._blank_draft else
+                                     "Saved / no pending changes")
 
     def mark_dirty(self, *_args):
         if not self._loading and hasattr(self, "dirty_label"):
             self.dirty = True
             self.dirty_label.setText("Unsaved changes")
 
-    def confirm_discard(self) -> bool:
+    def confirm_discard(self, include_metadata=True) -> bool:
         if hasattr(self, "_dirty_timer"):
             self._dirty_timer.stop()
             self.check_dirty()
-        if not self.dirty:
+        metadata_dirty = (include_metadata and self._blank_draft
+                          and self.metadata_snapshot() != self._metadata_snapshot)
+        if not self.dirty and not metadata_dirty:
             return True
         return QMessageBox.question(
-            self, "Unsaved design", "Discard unsaved design changes?",
+            self, "Unsaved design", "Discard unsaved design or draft changes?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes
 
@@ -397,6 +484,17 @@ class PinDesigner(QWidget):
         description = self.pin_description.text().strip()
         tags = self.pin_tags.text().strip()
         url = self.destination_url.text().strip()
+        if not self.validate_metadata(title, description, tags, url):
+            return False
+        self.storage.update(
+            "pins", pin_id, title=title, description=description,
+            tags=tags, destination_url=url, board_id=self.pin_board.currentData(),
+            product_id=self.pin_product.currentData(),
+            status=self.pin_status.currentText())
+        self._metadata_snapshot = self.metadata_snapshot()
+        return True
+
+    def validate_metadata(self, title, description, tags, url):
         if not title or len(title) > 300:
             QMessageBox.warning(self, "Pin title", "Enter a title (max 300 characters).")
             return False
@@ -408,11 +506,6 @@ class PinDesigner(QWidget):
             if parsed.scheme not in ("http", "https") or not parsed.netloc or len(url) > 4096:
                 QMessageBox.warning(self, "Invalid URL", "Enter a complete http:// or https:// destination URL.")
                 return False
-        self.storage.update(
-            "pins", pin_id, title=title, description=description,
-            tags=tags, destination_url=url, board_id=self.pin_board.currentData(),
-            product_id=self.pin_product.currentData(),
-            status=self.pin_status.currentText())
         return True
 
     def remember_current_pin(self):
@@ -438,6 +531,13 @@ class PinDesigner(QWidget):
 
     def on_pin_changed(self, _index):
         pin = self.storage.get("pins", self.pin.currentData()) if self.storage and self.pin.currentData() else None
+        if pin is not None and self._blank_draft:
+            if not self.confirm_discard():
+                blocked = self.pin.blockSignals(True)
+                self.pin.setCurrentIndex(-1)
+                self.pin.blockSignals(blocked)
+                return
+            self._blank_draft = False
         self.reload_metadata_choices()
         for widget, key in ((self.pin_board, "board_id"), (self.pin_product, "product_id")):
             index = widget.findData((pin or {}).get(key))
@@ -450,6 +550,7 @@ class PinDesigner(QWidget):
             widget.blockSignals(True)
             widget.setText((pin or {}).get(key) or "")
             widget.blockSignals(False)
+        self._metadata_snapshot = self.metadata_snapshot()
         # Canvas remains associated with its original pin until explicitly loaded.
         if self._canvas_pin_id != self.pin.currentData() and hasattr(self, "dirty_label"):
             self.dirty_label.setText("Different pin selected — load its design before editing")
@@ -510,6 +611,17 @@ class PinDesigner(QWidget):
 
     def reload_pins(self):
         old = self.pin.currentData()
+        if self._blank_draft and old is None:
+            blocked = self.pin.blockSignals(True)
+            try:
+                self.pin.clear()
+                if self.storage:
+                    for row in self.storage.all("pins"):
+                        self.pin.addItem(f"#{row['id']} {row['title']}", row["id"])
+                self.pin.setCurrentIndex(-1)
+            finally:
+                self.pin.blockSignals(blocked)
+            return
         self.pin.clear()
         if self.storage:
             for row in self.storage.all("pins"):
@@ -561,7 +673,7 @@ class PinDesigner(QWidget):
 
     def apply_template(self):
         template = TEMPLATES[self.template.currentText()]
-        if hasattr(self, "dirty_label") and not self.confirm_discard():
+        if hasattr(self, "dirty_label") and not self.confirm_discard(include_metadata=False):
             return
         self.background = template["background"]
         self._canvas_pin_id = self.pin.currentData()
@@ -770,7 +882,7 @@ class PinDesigner(QWidget):
             self.scene.addItem(item)
         self.fit()
 
-    def create_pin_for_design(self):
+    def create_pin_for_design(self, prompt_title=True):
         """Create a draft pin and attach the current canvas without discarding it."""
         if not self.storage:
             QMessageBox.warning(self, "No project", "Open a Pinterest OS project first.")
@@ -783,15 +895,19 @@ class PinDesigner(QWidget):
                    self.pin_tags.text(), self.destination_url.text(),
                    self.pin_board.currentData(), self.pin_product.currentData(),
                    self.pin_status.currentText())
-        title, ok = QInputDialog.getText(self, "Create pin", "Pin title:",
-                                         text=pending[0])
-        title = title.strip()
-        if not ok or not title:
+        title = pending[0].strip()
+        if prompt_title or not title:
+            title, ok = QInputDialog.getText(self, "Create pin", "Pin title:", text=title)
+            title = title.strip()
+            if not ok or not title:
+                return
+        if not self.validate_metadata(title, pending[1].strip(), pending[2].strip(), pending[3].strip()):
             return
         try:
             pin_id = self.storage.create("pins", title=title)
             self.reload_pins()
             index = self.pin.findData(pin_id)
+            self._blank_draft = False
             self.pin.setCurrentIndex(index)
             self._canvas_pin_id = pin_id
             for widget, value in zip((self.pin_title, self.pin_description,
@@ -822,13 +938,13 @@ class PinDesigner(QWidget):
             QMessageBox.warning(self, "No project", "Open a Pinterest OS project first.")
             return
         if self.pin.currentData() is None:
-            self.create_pin_for_design()
+            self.create_pin_for_design(prompt_title=False)
             return
         self.save_project()
 
     def save_project(self):
         pin_id = self.pin.currentData()
-        if self._canvas_pin_id is not None and pin_id != self._canvas_pin_id:
+        if pin_id != self._canvas_pin_id:
             QMessageBox.warning(self, "Different pin selected", "Load the selected pin first, or reselect the canvas pin.")
             return
         if not self.storage or pin_id is None:
@@ -993,7 +1109,7 @@ class PinDesigner(QWidget):
 
     def export_png(self):
         pin_id = self.pin.currentData()
-        if self._canvas_pin_id is not None and pin_id != self._canvas_pin_id:
+        if pin_id != self._canvas_pin_id:
             QMessageBox.warning(self, "Different pin selected", "Load the selected pin first.")
             return
         if not self.storage or pin_id is None:

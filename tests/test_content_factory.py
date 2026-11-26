@@ -409,3 +409,23 @@ def test_keyword_measurements_must_be_finite_and_well_typed(factory, metrics):
     with pytest.raises(ValueError):
         factory.add_keyword(sid, 'keyword', 'Provider', '2026-11-11', status='VERIFIED',
                             evidence_url='https://example.com/evidence', metric_definition='Monthly US observations', **metrics)
+
+
+def test_plan_cancel_and_delete_keep_factory_consistent(factory,tmp_path):
+    from pinterest_os import content_plan as plan
+    _,sid=prepared(factory,tmp_path)
+    factory.review(sid,approve=True,note='Editor')
+    pid=factory.export_slot(sid)
+    entry=factory.slot(sid)['schedule_id']
+    with pytest.raises(ValueError):
+        plan.delete_entry(factory.storage,entry)
+    plan.remove(factory.storage,entry)
+    assert plan.get_entry(factory.storage,entry)['status']=='CANCELLED'
+    assert factory.slot(sid)['status']=='DRAFT'
+    assert factory.slot(sid)['schedule_id'] is None
+    plan.delete_entry(factory.storage,entry)
+    assert factory.storage.get('pins',pid)
+    assert factory.storage.get_pin_design(pid)
+    factory.review(sid,approve=True,note='Editor reapproved')
+    assert factory.export_slot(sid)==pid
+    assert factory.slot(sid)['schedule_id'] is not None

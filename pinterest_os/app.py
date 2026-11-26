@@ -45,7 +45,7 @@ TITLES = {
     "PIN": ("Pin library", "Create, edit and organize organic pin drafts"),
     "CONTENT FACTORY": ("Content Factory", "Plan, design and review a monthly batch"),
     "BOARD": ("Boards", "Manage board names, links and descriptions"),
-    "CALENDAR": ("Publishing calendar", "Plan organic pin publishing dates and times"),
+    "CALENDAR": ("Контент-план", "Планування пінів і каруселей — дата, дошка, URL"),
     "PUBLISHING": ("Publishing", "Manual browser-based workflow"),
     "ANALYTICS": ("Analytics", "Local operations dashboard — no Pinterest API"),
     "REPORTS": ("Reports", "Product performance reports and local CSV export"),
@@ -174,6 +174,7 @@ class MainWindow(QMainWindow):
                     self.build_pin_google_tab(tabs)
                     self.pin_designer = PinDesigner(self.storage)
                     self.pin_designer.pin_saved.connect(self.pin_google_local_preview)
+                    self.pin_designer.plan_requested.connect(lambda pid: self.plan_content("PIN",pid))
                     self.pin_designer.pin_deleted.connect(self.pin_google_local_preview)
                     self.pin_designer.pin_deleted.connect(lambda _id: self.refresh("pins"))
                     self.pin_designer.pin_deleted.connect(lambda _id: self.calendar_page.refresh())
@@ -228,6 +229,7 @@ class MainWindow(QMainWindow):
                     canva_layout.addStretch(1)
                     tabs.addTab(canva_page, "CANVA")
                     self.carousel_page = CarouselPage(self.storage)
+                    self.carousel_page.plan_requested.connect(lambda cid: self.plan_content("CAROUSEL",cid))
                     tabs.addTab(self.carousel_page, "Carousel Builder")
                     content.addWidget(tabs, 1)
                 else:
@@ -491,7 +493,9 @@ class MainWindow(QMainWindow):
         self.carousel_page.storage = target
         self.carousel_page.reload_carousels()
         self.pin_designer.storage = target
+        self.pin_designer._blank_draft = False
         self.pin_designer.reload_pins()
+        self.pin_designer.on_pin_changed(self.pin_designer.pin.currentIndex())
         self.pin_designer._loading = True
         self.pin_designer.dirty = False
         try:
@@ -1223,6 +1227,8 @@ class MainWindow(QMainWindow):
         self.pin_designer.reload_pins()
         self.pin_designer.pin.setCurrentIndex(self.pin_designer.pin.findData(pin_id))
         self.pin_designer.pin.blockSignals(False)
+        self.pin_designer._blank_draft = False
+        self.pin_designer.on_pin_changed(self.pin_designer.pin.currentIndex())
         if self.storage.get_pin_design(pin_id):
             self.pin_designer.load_pin()
         else:
@@ -1241,7 +1247,24 @@ class MainWindow(QMainWindow):
         language = self.recent_settings.value("appearance/language", "en", str)
         apply_language(self, language)
         for key, button in self.nav_buttons.items():
-            button.setText(UK.get(key, key) if language == "uk" else key)
+            button.setText(UK.get(key, key) if language == "uk" else ("CONTENT PLAN" if key=="CALENDAR" else key))
+
+    def plan_content(self,kind,content_id):
+        from .content_plan import entries
+        rows=entries(self.storage,'0001-01-01','9999-12-31')
+        key='pin_id' if kind=='PIN' else 'carousel_id'
+        existing=next((r for r in rows if r['kind']==kind and r[key]==content_id
+                       and r['status'] in ('PLANNED','READY')),None)
+        self.open_page('CALENDAR')
+        if existing:
+            from PyQt6.QtCore import QDate
+            from .calendar import ScheduleDialog
+            self.calendar_page.calendar.setSelectedDate(QDate.fromString(existing['scheduled_at'][:10],'yyyy-MM-dd'))
+            if ScheduleDialog(self.storage,self.calendar_page.calendar.selectedDate(),
+                              existing,self.calendar_page).exec():
+                self.calendar_page.refresh()
+        else:
+            self.calendar_page.add_schedule(kind=kind,content_id=content_id)
 
     def open_page(self, name: str) -> None:
         if name == 'PIN':
@@ -1300,6 +1323,11 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Session stopped. Data saved.")
 
     def closeEvent(self, event) -> None:
+        importer = self.settings_page.pinterest_import.worker
+        if importer and importer.isRunning():
+            self.statusBar().showMessage('Триває запит Pinterest API. Закриття після завершення запиту.')
+            event.ignore()
+            return
         worker = self.content_factory_page.worker
         if worker and worker.isRunning():
             self.statusBar().showMessage('RSS refresh is finishing. Please close again once it completes.')

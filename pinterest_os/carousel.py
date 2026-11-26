@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QSize
+from PyQt6.QtCore import Qt, QSize, pyqtSignal
 from PyQt6.QtGui import QPixmap, QIcon
 from PyQt6.QtWidgets import (
     QComboBox, QFileDialog, QHBoxLayout, QInputDialog, QLabel, QListWidget,
@@ -16,6 +16,7 @@ from .carousel_viewer import CarouselViewer
 
 
 class CarouselPage(QWidget):
+    plan_requested = pyqtSignal(int)
     def __init__(self, storage, parent=None):
         super().__init__(parent)
         self.storage = storage
@@ -40,6 +41,9 @@ class CarouselPage(QWidget):
         self.new_carousel_button = QPushButton("+ Нова карусель")
         self.new_carousel_button.clicked.connect(self.create_carousel)
         header.addWidget(self.new_carousel_button)
+        self.plan_button=QPushButton("ДОДАТИ В КОНТЕНТ-ПЛАН")
+        self.plan_button.clicked.connect(self.request_plan)
+        header.addWidget(self.plan_button)
         layout.addLayout(header)
         self.slides = QListWidget()
         self.slides.setVisible(False)  # internal selection model; storyboard is the visible selector
@@ -138,6 +142,11 @@ class CarouselPage(QWidget):
         """)
         self.reload_carousels()
 
+    def request_plan(self):
+        cid=self.carousel.currentData()
+        if cid is not None:
+            self.plan_requested.emit(int(cid))
+
     def update_controls(self):
         carousel_exists = self.carousel.currentData() is not None
         count = self.slides.count()
@@ -148,6 +157,7 @@ class CarouselPage(QWidget):
         self.storyboard_title.setVisible(has_slides)
         self.storyboard.setVisible(has_slides)
         self.add_button.setEnabled(carousel_exists)
+        self.plan_button.setEnabled(carousel_exists)
         self.add_button.setText("Додати перший пін" if carousel_exists and not has_slides else "Додати пін з бібліотеки")
         self.fullscreen_button.setEnabled(has_slides)
         carousel_id = self.carousel.currentData()

@@ -163,3 +163,36 @@ def export_pin_rows_with_ids(storage):
         "SELECT pin_id,export_id FROM google_pin_export_ids").fetchall())
     return [{**row, "tags": pin.get("tags") or "", "pin_id": ids[pin["id"]]}
             for pin, row in zip(pins, export_pin_rows(storage))]
+
+
+TRACKING_FIELDS = ("tracking_code", "utm_source", "utm_medium", "campaign",
+                   "content_kind", "local_content_id", "title", "board",
+                   "original_url", "marketing_url", "scheduled_at", "local_status",
+                   "created_at", "registry_state")
+
+def export_tracking_rows(storage):
+    """Read-only registry snapshot, including detached historical allocations."""
+    from .content_plan import entries
+    from .utm import read_tracking_id
+    plans = {}
+    for row in entries(storage, "0001-01-01", "9999-12-31"):
+        if row["tracking_id"]:
+            plans.setdefault(row["tracking_id"], []).append(row)
+    result = []
+    for key, pin_id, original, url, campaign, created in storage.conn.execute(
+            "SELECT id,pin_id,original_url,marketing_url,campaign,created_at FROM pin_tracking ORDER BY id"):
+        code = read_tracking_id(url, "pint")
+        linked = plans.get(key, [])
+        pin = storage.get("pins", pin_id) if pin_id else None
+        for row in linked or [None]:
+            result.append(dict(zip(TRACKING_FIELDS, (
+                code, "pint", "organic_social", campaign,
+                row["kind"] if row else ("PIN" if pin else ""),
+                (row["pin_id"] or row["carousel_id"]) if row else (pin_id or ""),
+                row["title"] if row else ((pin or {}).get("title") or ""),
+                (row["board_name"] or "") if row else "",
+                original, url, row["scheduled_at"] if row else "",
+                row["status"] if row else ((pin or {}).get("status") or ""),
+                created, "PLANNED_RECORD" if row else ("PIN_RECORD" if pin else "DETACHED")
+            ))))
+    return result

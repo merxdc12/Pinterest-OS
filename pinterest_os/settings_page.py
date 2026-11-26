@@ -44,6 +44,11 @@ class SettingsPage(QWidget):
         accounts_layout = make_tab("Accounts")
         sheets_layout = make_tab("Google Sheets")
         diagnostics_layout = make_tab("Diagnostics")
+        pinterest_layout = make_tab("Pinterest — імпорт")
+        from .pinterest_import_page import PinterestImportPage
+        self.pinterest_import = PinterestImportPage(storage)
+        self.pinterest_import.imported.connect(self.refresh_after_pinterest_import)
+        pinterest_layout.addWidget(self.pinterest_import)
         layout = appearance_layout
         layout.addWidget(QLabel("Appearance"))
         self.theme_selector = QComboBox()
@@ -155,6 +160,7 @@ class SettingsPage(QWidget):
         for kind, caption in (
             ("time", "Export TIME entries to NEW worksheet"),
             ("analytics", "Export imported Pinterest metrics to NEW worksheet"),
+            ("tracking", "Export UTM tracking registry to NEW worksheet"),
         ):
             button = QPushButton(caption)
             button.clicked.connect(lambda checked=False, item=kind: self.export_google(item))
@@ -170,7 +176,7 @@ class SettingsPage(QWidget):
         refresh.clicked.connect(self.refresh)
         diagnostics_layout.addWidget(refresh)
         diagnostics_note = QLabel(
-            "Data stays in the local SQLite workspace. No Pinterest API, "
+            "Data stays in the local SQLite workspace. Pinterest API is read-only; no "
             "automatic posting or paid advertising. Financial labor rates "
             "are configured in ANALYTICS; time is recorded in TIME.")
         diagnostics_note.setWordWrap(True)
@@ -199,6 +205,16 @@ class SettingsPage(QWidget):
 
     def set_storage(self, storage):
         self.storage = storage
+        self.pinterest_import.set_storage(storage)
+        self.refresh()
+
+    def refresh_after_pinterest_import(self):
+        window=self.window()
+        if hasattr(window,"refresh") and hasattr(window,"tables"):
+            window.refresh("boards")
+            window.refresh("pins")
+            window.pin_designer.reload_pins()
+            window.calendar_page.refresh()
         self.refresh()
 
     def refresh(self):
@@ -384,6 +400,9 @@ class SettingsPage(QWidget):
             elif kind == "time":
                 headers = sheets_exchange.TIME_FIELDS
                 records = sheets_exchange.export_time_rows(self.storage)
+            elif kind == "tracking":
+                headers = sheets_exchange.TRACKING_FIELDS
+                records = sheets_exchange.export_tracking_rows(self.storage)
             elif kind == "analytics":
                 headers = sheets_exchange.METRIC_FIELDS
                 records = sheets_exchange.export_metric_rows(self.storage)
